@@ -1,7 +1,7 @@
 # Databricks – Data Engineering Training
 
 ## Overview
-This repository documents my hands-on data engineering internship training using Databricks, SQL, PySpark, Delta Lake and Lakeflow.
+This repository documents my hands-on data engineering internship training using Databricks, SQL, PySpark, Delta Lake, Unity Catalog and Lakeflow.
 
 ## Day 1 – Databricks Fundamentals
 
@@ -393,18 +393,482 @@ RuntimeError: Day 4 intentional failure for recovery testing
 
 ### Limitations
 - The pipeline reuses existing training datasets rather than live production data.
-- Auto Loader ingestion is incremental, but managed materialized views used full recomputation during the observed pipeline update.
+- Auto Loader ingestion is incremental, but managed materialized views used full recomputation during the initially observed pipeline update. The later scheduled update reviewed in Day 5 showed NO_OP planning.
 - Gold aggregations are grouped primarily by business identifiers.
 - Existing Day 3 quarantine data is preserved, while Day 4 expectations exclude invalid records without maintaining a separate historical rejection log.
 - Failure recovery was demonstrated using an intentionally simulated exception.
 - An automatic retry occurred during the controlled failure test before manual recovery.
 - Failure notification configuration was not verified.
-- Enterprise governance, access controls and performance optimization are covered in Day 5.
+- Governance, access controls and performance optimization are addressed in Day 5.
 
 ### Status
 Core practical assignment completed ✅
 
+## Day 5 – Governance and Production Basics
+
+### Objective
+
+Apply Unity Catalog governance, least-privilege access control, data lineage, environment separation, query optimization, pipeline monitoring and cost awareness to the existing Databricks training pipeline.
+
+### Completed Tasks
+- Inspected available Unity Catalog catalogs, schemas and tables.
+- Identified the current user and reviewed existing access privileges.
+- Inspected available Bronze, Silver and Gold data layers.
+- Created an account-level group named gold_readers.
+- Configured Gold read-only access using Unity Catalog privileges.
+- Granted USE CATALOG, USE SCHEMA and SELECT permissions.
+- Inspected catalog-level, schema-level and table-level privileges.
+- Validated the Gold read-only permission configuration.
+- Inspected Silver permissions to check for modification privileges.
+- Traced Gold daily sales data back to Bronze using Unity Catalog lineage.
+- Identified customer and product reference table dependencies.
+- Created separate development and production demonstration schemas.
+- Practiced column pruning and early filtering.
+- Analyzed physical execution plans using EXPLAIN FORMATTED.
+- Corrected the quantity filter from greater than 5 to greater than 3 based on the available dataset.
+- Identified scan-level filtering and Photon execution support.
+- Explored adaptive query execution and shuffle concepts.
+- Reviewed previous manual and scheduled Lakeflow Job executions.
+- Analyzed individual task durations and query metrics.
+- Identified the Transform task as the longest-running task.
+- Reviewed task execution events and detailed pipeline event logs.
+- Identified NO_OP refresh planning as a mechanism for avoiding unnecessary recomputation.
+- Reviewed production compute efficiency and cost-control practices.
+
+### Unity Catalog Structure
+
+```text
+Unity Catalog
+       |
+       +-- samples
+       |
+       +-- system
+       |
+       +-- workspace
+              |
+              +-- bronze
+              +-- silver
+              +-- gold
+              +-- default
+              +-- dev
+              +-- prod
+              +-- information_schema
+```
+
+### Account Group Configuration
+
+| Setting | Value |
+|---|---|
+| Group name | gold_readers |
+| Group source | Account |
+| Group members during exercise | 0 |
+| Purpose | Read-only access to Gold reporting tables |
+
+### Unity Catalog Privileges
+
+| Principal | Object | Privilege |
+|---|---|---|
+| gold_readers | workspace | USE CATALOG |
+| gold_readers | workspace.gold | USE SCHEMA |
+| gold_readers | workspace.gold | SELECT |
+
+### Permission Configuration
+
+```sql
+GRANT USE CATALOG ON CATALOG workspace
+TO `gold_readers`;
+
+GRANT USE SCHEMA ON SCHEMA workspace.gold
+TO `gold_readers`;
+
+GRANT SELECT ON SCHEMA workspace.gold
+TO `gold_readers`;
+```
+
+The schema-level SELECT privilege provides read access to current and future eligible tables within the Gold schema.
+
+No MODIFY privilege was granted to the group.
+
+### Intended Access Control Model
+
+| Operation | Data Engineer | Gold Readers |
+|---|---|---|
+| Read Bronze data | Allowed | Not granted |
+| Modify Bronze data | Allowed | Not granted |
+| Read Silver data | Allowed | Not granted |
+| Modify Silver data | Allowed | Not granted |
+| Read Gold data | Allowed | Allowed |
+| Modify Gold data | Allowed | Not granted |
+
+This configuration demonstrates the principle of least privilege by granting only the permissions necessary for business reporting.
+
+The intended access model assumes that analysts do not receive additional privileges through other groups or ownership.
+
+### Permission Validation Results
+
+| Validation | Result |
+|---|---|
+| Account-level group creation | PASS |
+| Catalog USE CATALOG privilege | PASS |
+| Gold USE SCHEMA privilege | PASS |
+| Gold SELECT privilege | PASS |
+| Gold table privilege inspection | Completed |
+| Silver schema privilege inspection | No grants returned |
+| Silver orders_clean privilege inspection | No grants returned |
+| Separate non-admin access-denial test | Not tested |
+
+The group contained no members during the training exercise. Therefore, the validation confirms the configured privileges rather than actual access enforcement for a separate analyst account.
+
+### Verified Data Lineage
+
+```text
+Bronze Orders
+      |
+      v
+Silver Orders Clean
+      |
+      +-------------------------+
+                                |
+Products Reference ------------>|
+                                v
+Customers Reference ----------> Orders Enriched
+                                (Silver View)
+                                      |
+                                      v
+                                Daily Sales
+                                (Gold Table)
+                                      |
+                                      v
+                              Downstream Consumers
+```
+
+### Verified Lineage Objects
+
+| Layer | Object | Responsibility |
+|---|---|---|
+| Bronze | workspace.bronze.orders | Raw order records |
+| Silver | workspace.silver.orders_clean | Validated order records |
+| Silver | workspace.silver.products_reference | Product reference information |
+| Silver | workspace.silver.customers_reference | Customer reference information |
+| Silver | workspace.silver.orders_enriched | Combined order and reference information |
+| Gold | workspace.gold.daily_sales | Aggregated business sales metrics |
+
+Unity Catalog lineage confirmed the relationships between the Bronze source table, Silver transformations and Gold business output.
+
+The original CSV source file was not visible in the inspected lineage graph.
+
+### Development and Production Separation
+
+Created separate schemas to demonstrate environment organization.
+
+```sql
+CREATE SCHEMA IF NOT EXISTS workspace.dev;
+
+CREATE SCHEMA IF NOT EXISTS workspace.prod;
+
+SHOW SCHEMAS IN workspace;
+```
+
+| Schema | Purpose |
+|---|---|
+| workspace.dev | Development and testing demonstration |
+| workspace.prod | Production organization demonstration |
+
+Existing Bronze, Silver and Gold datasets were preserved.
+
+This exercise demonstrates schema-level organization rather than fully isolated enterprise development and production environments.
+
+### Query Optimization
+
+Practiced three fundamental query optimization techniques:
+
+- Selecting only required columns instead of SELECT *.
+- Applying filters to reduce unnecessary processing.
+- Reviewing physical execution plans to understand query execution.
+
+#### Optimized Query Execution Plan
+
+```sql
+EXPLAIN FORMATTED
+SELECT
+    store_id,
+    SUM(quantity * unit_price) AS total_revenue
+FROM workspace.silver.orders_clean
+WHERE quantity > 3
+GROUP BY store_id;
+```
+
+### Execution Plan Results
+
+| Observation | Result |
+|---|---|
+| Available source columns | 8 |
+| Required scan columns | 3 |
+| Required columns | store_id, quantity, unit_price |
+| Scan-level filter | quantity > 3 |
+| Scan operation | PhotonScan |
+| Aggregation operation | PhotonGroupingAgg |
+| Query engine | Photon |
+| Photon support | Full |
+| Adaptive execution | AdaptiveSparkPlan |
+| Optimizer statistics | Full |
+| Execution plan state | Initial plan |
+
+The execution plan demonstrated column pruning and scan-level filtering.
+
+Only the three columns required for the aggregation were included in the scan schema.
+
+No explicit shuffle operation was visible in the initial execution plan. Runtime shuffle behavior and measured performance improvements were not established.
+
+### Query Debugging
+
+The initial filtering condition was:
+
+```sql
+WHERE quantity > 5
+```
+
+The execution plan returned an empty LocalTableScan because the available order quantities did not exceed 5.
+
+The condition was changed to:
+
+```sql
+WHERE quantity > 3
+```
+
+The corrected execution plan successfully displayed scan, filtering and aggregation operations with full Photon support.
+
+### Lakeflow Job Monitoring
+
+Reviewed the previously executed Day 4 retail production job.
+
+| Setting | Value |
+|---|---|
+| Job name | Day_04_Retail_Production_Job |
+| Execution date | November 26, 2026 |
+| Compute for displayed notebook tasks | Serverless |
+| Performance optimization | Enabled |
+| Successful runs reviewed | 2 |
+| Schedule status during review | Paused |
+
+### Job Execution Results
+
+| Execution Type | Duration | Status |
+|---|---|---|
+| Manual | 2 minutes 39 seconds | Succeeded |
+| Scheduled | 1 minute 38 seconds | Succeeded |
+
+The runs used different failure simulation parameter values. Therefore, the duration difference does not establish a performance improvement caused by scheduling.
+
+### Scheduled Job Task Performance
+
+| Task | Duration | Status |
+|---|---|---|
+| Ingest | 12 seconds | Succeeded |
+| Transform | 1 minute 1 second | Succeeded |
+| Aggregate | 12 seconds | Succeeded |
+| Data_Quality | 8 seconds | Succeeded |
+
+The Transform task was identified as the longest-running task and a candidate for further performance investigation.
+
+### Job Performance Metrics
+
+| Metric | Result |
+|---|---|
+| Successful tasks | 4 out of 4 |
+| Total duration in run details | 1 minute 37 seconds |
+| Number of queries | 14 |
+| Rows read | 301,116 |
+| Rows written in reported query metrics | 1 |
+| Performance optimization | Enabled |
+| Final job status | Succeeded |
+
+Rows read represent cumulative query activity rather than the number of unique source records.
+
+The reported rows-written metric does not necessarily represent the total output across the entire managed pipeline.
+
+### Pipeline Run Events
+
+Reviewed the following execution lifecycle events:
+
+| Event | Description |
+|---|---|
+| started | Execution initiated |
+| waitingForCompute | Waiting for compute resources |
+| computeReady | Compute resources available |
+| startedRunning | Processing started |
+| succeeded | Execution completed successfully |
+
+### Lakeflow Pipeline Event Log Review
+
+| Pipeline Flow | Refresh Planning | Final Status |
+|---|---|---|
+| day4_bronze_orders | NO_OP | COMPLETED |
+| day4_valid_orders | NO_OP | COMPLETED |
+| day4_silver_orders | NO_OP | COMPLETED |
+| day4_gold_daily_sales | NO_OP | COMPLETED |
+| day4_gold_product_sales | NO_OP | COMPLETED |
+| day4_gold_customer_sales | NO_OP | COMPLETED |
+
+All six managed pipeline flows completed successfully.
+
+NO_OP planning indicates that unnecessary recomputation was avoided because the affected flows did not require data updates.
+
+However, NO_OP does not imply that the entire job consumed zero compute resources.
+
+### Performance and Cost Awareness
+
+Reviewed the following production optimization practices:
+
+- Process only new or changed data using incremental ingestion.
+- Select only required columns.
+- Apply relevant filters early.
+- Avoid unnecessary full-table processing.
+- Reduce unnecessary data movement and shuffle operations.
+- Investigate long-running pipeline tasks.
+- Use appropriate compute resources.
+- Avoid unnecessary pipeline and job reruns.
+- Repair failed tasks instead of restarting successful upstream tasks.
+- Pause unused job schedules.
+- Monitor Lakeflow refresh planning and NO_OP execution.
+
+### Governance and Production Checklist
+
+- [x] Unity Catalog inspection
+- [x] Existing user and privilege inspection
+- [x] Account-level group creation
+- [x] Gold read-only permission configuration
+- [x] Silver privilege inspection
+- [x] Bronze-to-Gold data lineage inspection
+- [x] Development and production schema creation
+- [x] Column pruning demonstration
+- [x] Early filtering demonstration
+- [x] Physical execution plan analysis
+- [x] Photon execution support verification
+- [x] Lakeflow Job monitoring
+- [x] Individual task performance review
+- [x] Pipeline event log inspection
+- [x] Cost-awareness review
+- [ ] Separate non-admin access-denial test
+- [ ] Week 1 mentor presentation
+
+### Source Files
+
+| File | Purpose |
+|---|---|
+| Day_05_Governance_and_Production_Basics.py | Unity Catalog inspection, permission configuration, schema creation, validation queries and query optimization |
+
+Supporting screenshots are organized in the Day 5 evidence folder.
+
+### Key Learning Outcomes
+
+- Unity Catalog governance and access management.
+- Catalog, schema and table hierarchy.
+- Account-level groups and data privileges.
+- Principle of least privilege.
+- Schema-level privilege inheritance.
+- Upstream and downstream data lineage.
+- Development and production environment separation.
+- Column pruning and filter pushdown.
+- Physical query execution plans.
+- Photon query execution.
+- Adaptive query execution.
+- Shuffle operations and data movement.
+- Lakeflow job history and performance metrics.
+- Pipeline execution events and event logs.
+- NO_OP refresh planning.
+- Compute efficiency and production cost awareness.
+
+### Limitations
+
+- Actual access-denial testing requires a separate non-admin analyst account.
+- The permission exercise targets workspace.gold rather than the separate Day 4 managed outputs in workspace.default.
+- Development and production separation was demonstrated at schema level only.
+- Actual compute consumption and billing charges were not measured in the Databricks Free Edition environment.
+- Query optimization was verified through execution plans rather than controlled runtime benchmarks.
+
+### Status
+
+Practical exercises completed ✅
+
+## Week 1 – Databricks Training Summary
+
+The first week of training covered the development of a retail data engineering pipeline from source ingestion to production-style orchestration, governance and operational monitoring.
+
+### End-to-End Architecture
+
+```text
+Source CSV Files
+       |
+       v
+Databricks Auto Loader
+       |
+       v
+Bronze Delta Tables
+       |
+       v
+Data Quality Validation
+       |
+       +-------------------+
+       |                   |
+       v                   v
+Silver Delta Tables    Quarantine Table
+       |
+       v
+Gold Business Aggregations
+       |
+       v
+Business Reporting
+```
+
+Cross-cutting platform capabilities:
+
+```text
+Lakeflow Spark Declarative Pipelines
+    - Managed data transformations
+    - Data quality expectations
+    - Refresh planning
+
+Lakeflow Jobs
+    - Task orchestration
+    - Scheduled execution
+    - Failure recovery
+
+Unity Catalog
+    - Access control
+    - Data governance
+    - Data lineage
+
+Production Monitoring
+    - Job history
+    - Performance metrics
+    - Pipeline event logs
+    - Cost awareness
+```
+
+### Week 1 Achievements
+
+| Capability | Status |
+|---|---|
+| SQL and PySpark transformations | Completed |
+| Delta Lake operations | Completed |
+| Medallion architecture | Completed |
+| Incremental file ingestion | Completed |
+| Schema evolution | Completed |
+| Data quality validation | Completed |
+| Quarantine handling | Completed |
+| Idempotency verification | Completed |
+| Managed Lakeflow pipelines | Completed |
+| Job orchestration | Completed |
+| Scheduled execution | Completed |
+| Failure simulation and recovery | Completed |
+| Unity Catalog governance | Configured |
+| Data lineage | Verified |
+| Query optimization | Demonstrated |
+| Production monitoring | Completed |
+
 ## Technologies Used
+
 - Databricks
 - Apache Spark
 - PySpark
@@ -417,6 +881,7 @@ Core practical assignment completed ✅
 - Lakeflow Spark Declarative Pipelines
 - Lakeflow Jobs
 - Materialized Views
+- Photon
 - GitHub
 
 ## Training Progress
@@ -427,4 +892,8 @@ Core practical assignment completed ✅
 | Day 2 | Delta Lake and Medallion Architecture | Completed ✅ |
 | Day 3 | Incremental Ingestion and Data Quality | Completed ✅ |
 | Day 4 | Production Pipelines and Scheduling | Completed ✅ |
-| Day 5 | Governance and Production Basics | Pending |
+| Day 5 | Governance and Production Basics | Practical exercises completed ✅ |
+
+**Week 1 – Databricks:** Practical training completed. Mentor presentation and separate analyst access-denial testing remain pending.
+
+**Next Stage:** Week 2 – Snowflake Data Engineering Training.
